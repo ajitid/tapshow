@@ -34,24 +34,18 @@ sudo apt install libgtk-4-dev libglib2.0-dev libgirepository1.0-dev
 sudo dnf install gtk4-devel glib2-devel gobject-introspection-devel
 
 # Arch Linux
-sudo pacman -S gtk4 glib2 gobject-introspection
+sudo pacman -S gtk4 glib2 gobject-introspection-runtime
 ```
 
-### Input Group Membership
+### Input permissions
 
-Tapshow reads keyboard input from `/dev/input/event*` devices, which requires membership in the `input` group:
+Tapshow reads keyboard events from `/dev/input/event*`.
 
-```bash
-sudo usermod -aG input $USER
-```
+If your user can already read those devices, for example via the `input` group or equivalent udev permissions, tapshow reads them directly and no polkit prompt is shown.
 
-**Important:** Log out and back in for the group change to take effect.
+Otherwise tapshow uses `pkexec` to run a small privileged input helper. The GTK app still runs as your normal user; only the helper reads `/dev/input/event*` as root.
 
-To verify:
-
-```bash
-groups | grep input
-```
+Installing the polkit policy makes the authentication prompt specific to tapshow and authorizes only the helper subcommand.
 
 ## Installation
 
@@ -70,7 +64,7 @@ cd tapshow
 just build
 
 # Install (optional)
-sudo cp bin/tapshow /usr/local/bin/
+just install
 ```
 
 ## Usage
@@ -113,19 +107,32 @@ The privacy monitor checks the focused window every 500ms and pauses the display
 
 ## Troubleshooting
 
-### "no keyboards found" Error
+### `pkexec` Missing / Authentication Prompt Appears
 
-Ensure you're in the `input` group:
+Install polkit for your distribution, then run tapshow again.
+
+If you do not want a polkit prompt, grant your user read access to keyboard event devices, commonly by adding the user to the `input` group and logging out/in. Be aware that this grants broad input-device access.
+
+### Authentication Denied or Cancelled
+
+Run tapshow again and complete the polkit authentication prompt.
+
+### Policy Path Mismatch
+
+The packaged policy authorizes `/usr/local/bin/tapshow input-helper`. Verify the installed path:
 
 ```bash
-groups | grep input
+which tapshow
 ```
 
-If not present:
+If it differs, update the `org.freedesktop.policykit.exec.path` annotation in `/usr/share/polkit-1/actions/ca.icewolf.tapshow.policy` or install tapshow to `/usr/local/bin/tapshow`.
+
+### "no keyboards found" from Helper
+
+Run the helper directly as root to isolate device discovery:
 
 ```bash
-sudo usermod -aG input $USER
-# Then log out and back in
+sudo /usr/local/bin/tapshow input-helper
 ```
 
 ### Window Not Visible
@@ -136,8 +143,9 @@ sudo usermod -aG input $USER
 ### Keys Not Appearing
 
 1. Check that tapshow is running: `pgrep tapshow`
-2. Verify input permissions: `ls -la /dev/input/event*`
-3. Try running with `sudo` to test (not recommended for regular use)
+2. Verify direct input access: `test -r /dev/input/event0` is only a rough check; device numbers vary.
+3. Verify the helper can discover keyboards: `sudo /usr/local/bin/tapshow input-helper`
+4. Verify the polkit policy path matches the installed binary
 
 ## Building from Source
 

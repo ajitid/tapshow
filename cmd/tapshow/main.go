@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ Designed for screen recordings, presentations, and live coding.`,
 		configCmd(),
 		debugCmd(),
 		versionCmd(),
+		inputHelperCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -55,9 +57,19 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing display: %w", err)
 	}
 
-	reader := input.NewReader()
-	if err := reader.Start(); err != nil {
-		return fmt.Errorf("starting input reader: %w", err)
+	var reader input.Reader
+	directReader := input.NewDirectReader()
+	if err := directReader.Start(); err == nil {
+		reader = directReader
+		fmt.Println("Using direct input backend")
+	} else {
+		fmt.Printf("Direct input unavailable (%v); falling back to pkexec.\n", err)
+		pkexecReader := input.NewPkexecReader("")
+		if err := pkexecReader.Start(); err != nil {
+			return fmt.Errorf("starting input reader: %w", err)
+		}
+		reader = pkexecReader
+		fmt.Println("Using pkexec input backend")
 	}
 	defer reader.Stop()
 
@@ -72,7 +84,21 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 	proc := processor.New(procCfg)
 
-	go proc.Process(reader.Events())
+	processorInput := make(chan input.KeyEvent, 100)
+	readerErr := make(chan error, 1)
+	go func() {
+		defer close(processorInput)
+		for ev := range reader.Events() {
+			processorInput <- ev
+		}
+		if errReader, ok := reader.(interface{ Err() error }); ok {
+			readerErr <- errReader.Err()
+			return
+		}
+		readerErr <- nil
+	}()
+
+	go proc.Process(processorInput)
 	defer proc.Stop()
 
 	privacyMonitor := privacy.NewMonitor(cfg.Privacy.PauseOnApps, func(paused bool) {
@@ -97,17 +123,41 @@ func run(cmd *cobra.Command, args []string) error {
 		}
 	}()
 
+	var stopBackendOnce sync.Once
+	stopBackend := func() {
+		stopBackendOnce.Do(func() {
+			backend.Stop()
+		})
+	}
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		<-sigChan
 		fmt.Println("\nShutting down...")
-		backend.Stop()
+		stopBackend()
+	}()
+
+	runErr := make(chan error, 1)
+	go func() {
+		if err := <-readerErr; err != nil {
+			fmt.Fprintf(os.Stderr, "Input reader failed: %v\n", err)
+			runErr <- err
+			stopBackend()
+		}
 	}()
 
 	fmt.Println("tapshow running. Press Ctrl+C to exit.")
-	return backend.Run()
+	if err := backend.Run(); err != nil {
+		return err
+	}
+	select {
+	case err := <-runErr:
+		return fmt.Errorf("input reader failed: %w", err)
+	default:
+		return nil
+	}
 }
 
 func showGTKWindowTips(compositor display.Compositor) {
@@ -222,4 +272,47 @@ func versionCmd() *cobra.Command {
 			fmt.Printf("tapshow %s\n", version)
 		},
 	}
+}
+
+func inputHelperCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:    "input-helper",
+		Short:  "Privileged input event helper",
+		Hidden: true,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runInputHelper()
+		},
+	}
+}
+
+func runInputHelper() error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("input-helper must be run as root")
+	}
+
+	reader := input.NewDirectReader()
+	if err := reader.Start(); err != nil {
+		return err
+	}
+	defer reader.Stop()
+
+	ready, err := input.MarshalReady()
+	if err != nil {
+		return fmt.Errorf("marshal ready message: %w", err)
+	}
+	if _, err := os.Stdout.Write(append(ready, '\n')); err != nil {
+		return fmt.Errorf("write ready message: %w", err)
+	}
+
+	for ev := range reader.Events() {
+		line, err := input.MarshalEvent(ev)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "marshal event: %v\n", err)
+			continue
+		}
+		if _, err := os.Stdout.Write(append(line, '\n')); err != nil {
+			return err
+		}
+	}
+	return nil
 }

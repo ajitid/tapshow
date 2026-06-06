@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unsafe"
@@ -24,31 +25,38 @@ type inputEvent struct {
 	Value int32
 }
 
-type Reader struct {
-	devices []*os.File
-	events  chan KeyEvent
-	done    chan struct{}
+type Reader interface {
+	Events() <-chan KeyEvent
+	Start() error
+	Stop()
 }
 
-func NewReader() *Reader {
-	return &Reader{
+type DirectReader struct {
+	devices  []*os.File
+	events   chan KeyEvent
+	done     chan struct{}
+	stopOnce sync.Once
+}
+
+func NewDirectReader() *DirectReader {
+	return &DirectReader{
 		events: make(chan KeyEvent, 100),
 		done:   make(chan struct{}),
 	}
 }
 
-func (r *Reader) Events() <-chan KeyEvent {
+func (r *DirectReader) Events() <-chan KeyEvent {
 	return r.events
 }
 
-func (r *Reader) Start() error {
+func (r *DirectReader) Start() error {
 	keyboards, err := findKeyboards()
 	if err != nil {
 		return fmt.Errorf("failed to find keyboards: %w", err)
 	}
 
 	if len(keyboards) == 0 {
-		return fmt.Errorf("no keyboards found - ensure you're in the 'input' group")
+		return fmt.Errorf("no keyboards found - direct input mode requires root or 'input' group access")
 	}
 
 	for _, path := range keyboards {
@@ -61,20 +69,22 @@ func (r *Reader) Start() error {
 	}
 
 	if len(r.devices) == 0 {
-		return fmt.Errorf("could not open any keyboard devices - check 'input' group membership")
+		return fmt.Errorf("could not open any keyboard devices - direct input mode requires root or 'input' group access")
 	}
 
 	return nil
 }
 
-func (r *Reader) Stop() {
-	close(r.done)
-	for _, f := range r.devices {
-		f.Close()
-	}
+func (r *DirectReader) Stop() {
+	r.stopOnce.Do(func() {
+		close(r.done)
+		for _, f := range r.devices {
+			_ = f.Close()
+		}
+	})
 }
 
-func (r *Reader) readDevice(f *os.File) {
+func (r *DirectReader) readDevice(f *os.File) {
 	buf := make([]byte, inputEventSize)
 
 	for {

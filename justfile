@@ -9,6 +9,10 @@ build:
 run: build
     ./bin/tapshow
 
+install: build
+    sudo install -Dm755 bin/tapshow /usr/local/bin/tapshow
+    sudo install -Dm644 packaging/ca.icewolf.tapshow.policy /usr/share/polkit-1/actions/ca.icewolf.tapshow.policy
+
 test path="./..." *flags="":
     go test {{flags}} {{path}}
 
